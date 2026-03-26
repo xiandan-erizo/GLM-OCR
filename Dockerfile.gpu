@@ -2,6 +2,8 @@ FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
 
 WORKDIR /app
 
+ARG APT_MIRROR=
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -12,7 +14,10 @@ ENV PYTHONUNBUFFERED=1 \
     GLMOCR_ENABLE_LAYOUT=true \
     GLMOCR_LAYOUT_DEVICE=cuda:0
 
-RUN sed -i "s|archive.ubuntu.com|${APT_MIRROR}|g; s|security.ubuntu.com|${APT_MIRROR}|g" /etc/apt/sources.list.d/ubuntu.sources || true; \
+RUN set -eux; \
+    if [ -n "${APT_MIRROR}" ] && [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+        sed -i "s|archive.ubuntu.com|${APT_MIRROR}|g; s|security.ubuntu.com|${APT_MIRROR}|g" /etc/apt/sources.list.d/ubuntu.sources; \
+    fi; \
     apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgomp1 \
