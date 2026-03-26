@@ -37,12 +37,7 @@ COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh && \
     python -m pip install --no-cache-dir uv && \
-    uv pip install --system -e . && \
-    uv pip install --system \
-      "flask>=3.1.0" \
-      "transformers>=4.46.0" \
-      "sentencepiece>=0.2.0" \
-      "accelerate>=1.0.0"
+    uv pip install --system -e ".[server,layout]"
 
 EXPOSE 5002
 
