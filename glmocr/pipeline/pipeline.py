@@ -175,11 +175,15 @@ class Pipeline:
         Yields:
             PipelineResult per input URL (one image or one PDF).
         """
+        logger.debug("[pipeline] Process started, enable_layout=%s", self.enable_layout)
 
         if not self.enable_layout:
+            logger.debug("[pipeline] Layout disabled, using direct OCR path")
             image_urls = self._extract_image_urls(request_data)
             if not image_urls:
+                logger.debug("[pipeline] No image URLs, processing request_data directly")
                 request_data = self.page_loader.build_request(request_data)
+                logger.debug("[pipeline] Calling OCR client")
                 response, status_code = self.ocr_client.process(request_data)
                 if status_code != 200:
                     raise Exception(
@@ -308,6 +312,7 @@ class Pipeline:
         state = self._create_async_pipeline_state(page_maxsize, region_maxsize)
 
         def data_loading_thread() -> None:
+            logger.debug("[pipeline] Data loading thread started")
             try:
                 img_idx = 0
                 unit_indices_list: List[int] = []
@@ -320,9 +325,10 @@ class Pipeline:
                     img_idx += 1
                     state.num_images_loaded[0] = img_idx
                     state.unit_indices_holder[0] = list(unit_indices_list)
+                logger.debug("[pipeline] Data loading complete: %d page(s)", img_idx)
                 state.page_queue.put(("done", None, None))
             except Exception as e:
-                logger.exception("Data loading thread error: %s", e)
+                logger.exception("[pipeline] Data loading thread error: %s", e)
                 state.num_images_loaded[0] = img_idx
                 state.unit_indices_holder[0] = list(unit_indices_list)
                 with state.exception_lock:
@@ -330,6 +336,7 @@ class Pipeline:
                 state.page_queue.put(("error", None, None))
 
         def layout_detection_thread() -> None:
+            logger.debug("[pipeline] Layout detection thread started")
             try:
                 batch_images: List[Any] = []
                 batch_indices: List[int] = []
@@ -358,6 +365,7 @@ class Pipeline:
                         batch_images.append(data)
                         batch_indices.append(img_idx)
                         if len(batch_images) >= self.layout_detector.batch_size:
+                            logger.debug("[pipeline] Layout batch full (%d), processing", len(batch_images))
                             self._stream_process_layout_batch(
                                 batch_images,
                                 batch_indices,
@@ -374,6 +382,7 @@ class Pipeline:
                     elif item_type == "done":
                         loading_complete = True
                         if batch_images:
+                            logger.debug("[pipeline] Processing final layout batch (%d)", len(batch_images))
                             self._stream_process_layout_batch(
                                 batch_images,
                                 batch_indices,
@@ -384,13 +393,15 @@ class Pipeline:
                                 layout_vis_output_dir,
                                 global_start_idx,
                             )
+                        logger.debug("[pipeline] Layout detection complete")
                         state.region_queue.put(("done", None, None))
                         break
                     elif item_type == "error":
+                        logger.error("[pipeline] Layout detection received error signal")
                         state.region_queue.put(("error", None, None))
                         break
             except Exception as e:
-                logger.exception("Layout detection thread error: %s", e)
+                logger.exception("[pipeline] Layout detection thread error: %s", e)
                 with state.exception_lock:
                     state.exceptions.append(("LayoutDetectionThread", e))
                 state.region_queue.put(("error", None, None))
@@ -437,6 +448,7 @@ class Pipeline:
                         state.units_put.add(u)
 
         def vlm_recognition_thread() -> None:
+            logger.debug("[pipeline] VLM recognition thread started, max_workers=%d", self.max_workers)
             try:
                 executor = ThreadPoolExecutor(max_workers=min(self.max_workers, 128))
                 futures: Dict[Any, Tuple[Dict, str, int]] = {}
@@ -489,8 +501,10 @@ class Pipeline:
                             future = executor.submit(self.ocr_client.process, req)
                             futures[future] = (region, task_type, page_idx)
                     elif item_type == "done":
+                        logger.debug("[pipeline] VLM recognition received done signal, waiting for %d pending futures", len(futures))
                         processing_complete = True
                     elif item_type == "error":
+                        logger.error("[pipeline] VLM recognition received error signal")
                         break
                 if futures:
                     for future in as_completed(futures.keys()):
@@ -510,19 +524,23 @@ class Pipeline:
                             state.recognition_results.append((page_idx, info))
                         maybe_notify_ready_units(page_idx)
                 executor.shutdown(wait=True)
+                logger.debug("[pipeline] VLM recognition thread complete, %d results", len(state.recognition_results))
             except Exception as e:
-                logger.exception("VLM recognition thread error: %s", e)
+                logger.exception("[pipeline] VLM recognition thread error: %s", e)
                 with state.exception_lock:
                     state.exceptions.append(("VLMRecognitionThread", e))
 
         t1 = threading.Thread(target=data_loading_thread, daemon=True)
         t2 = threading.Thread(target=layout_detection_thread, daemon=True)
         t3 = threading.Thread(target=vlm_recognition_thread, daemon=True)
+        logger.debug("[pipeline] Starting 3 processing threads")
         t1.start()
         t2.start()
         t3.start()
         t1.join()
+        logger.debug("[pipeline] Data loading thread joined")
         t2.join()
+        logger.debug("[pipeline] Layout detection thread joined")
 
         num_images = state.num_images_loaded[0]
         unit_indices = state.unit_indices_holder[0]
@@ -609,6 +627,7 @@ class Pipeline:
             emitted.add(u)
 
         t3.join()
+        logger.debug("[pipeline] VLM recognition thread joined")
         with state.exception_lock:
             if state.exceptions:
                 raise RuntimeError("; ".join(f"{n}: {e}" for n, e in state.exceptions))
@@ -625,12 +644,14 @@ class Pipeline:
         global_start_idx: int,
     ) -> None:
         """Run layout detection on a batch and push regions to queue2."""
+        logger.debug("[pipeline] Processing layout batch: %d image(s)", len(batch_images))
         layout_results = self.layout_detector.process(
             batch_images,
             save_visualization=save_visualization and vis_output_dir is not None,
             visualization_output_dir=vis_output_dir,
             global_start_idx=global_start_idx,
         )
+        total_regions = 0
         for img_idx, image, layout_result in zip(
             batch_indices, batch_images, layout_results
         ):
@@ -644,6 +665,8 @@ class Pipeline:
                         (cropped, region, region["task_type"], img_idx),
                     )
                 )
+                total_regions += 1
+        logger.debug("[pipeline] Layout batch done: %d regions queued", total_regions)
 
     def _extract_image_urls(self, request_data: Dict[str, Any]) -> List[str]:
         """Extract image URLs from request_data."""

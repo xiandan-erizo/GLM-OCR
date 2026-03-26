@@ -68,8 +68,11 @@ def create_app(config: "GlmOcrConfig") -> Flask:
                 "markdown_result": "..."
             }
         """
+        logger.debug("[parse] Request received")
+
         # Validate Content-Type
         if request.headers.get("Content-Type") != "application/json":
+            logger.warning("[parse] Invalid Content-Type: %s", request.headers.get("Content-Type"))
             return (
                 jsonify(
                     {"error": "Invalid Content-Type. Expected 'application/json'."}
@@ -80,7 +83,9 @@ def create_app(config: "GlmOcrConfig") -> Flask:
         # Parse JSON payload
         try:
             data = request.json
-        except Exception:
+            logger.debug("[parse] JSON payload parsed")
+        except Exception as e:
+            logger.warning("[parse] Invalid JSON payload: %s", e)
             return jsonify({"error": "Invalid JSON payload"}), 400
 
         images = data.get("images", [])
@@ -88,6 +93,7 @@ def create_app(config: "GlmOcrConfig") -> Flask:
             images = [images]
 
         if not images:
+            logger.warning("[parse] No images provided")
             return jsonify({"error": "No images provided"}), 400
 
         # Build pipeline request
@@ -98,6 +104,7 @@ def create_app(config: "GlmOcrConfig") -> Flask:
             )
 
         request_data = {"messages": messages}
+        logger.debug("[parse] Request data built, calling pipeline.process()")
 
         try:
             # Pipeline.process() yields one result per input unit; merge for single response
@@ -125,6 +132,7 @@ def create_app(config: "GlmOcrConfig") -> Flask:
                     200,
                 )
             # Multiple units: merge json as list, markdown with separator
+            logger.debug("[parse] Merging %d results", len(results))
             json_result = [r.json_result for r in results]
             markdown_result = "\n\n---\n\n".join(
                 r.markdown_result or "" for r in results

@@ -1,10 +1,12 @@
 """Unit tests for glmocr (no external services required)."""
 
 import json
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PIL import Image
 
 
 class TestConfig:
@@ -234,6 +236,18 @@ class TestPageLoader:
         assert loader.max_tokens == 8192
         assert loader.image_format == "PNG"
 
+    @staticmethod
+    def _mock_streaming_response(body: bytes, content_type: str, content_length=None):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = None
+        response.raise_for_status.return_value = None
+        response.headers = {"Content-Type": content_type}
+        if content_length is not None:
+            response.headers["Content-Length"] = str(content_length)
+        response.iter_content.return_value = [body]
+        return response
+
     def test_pageloader_load_pdf_requires_pypdfium2(self):
         """Gives a clear error when pypdfium2 is unavailable."""
         from glmocr.dataloader import PageLoader
@@ -290,6 +304,103 @@ class TestPageLoader:
         pdf_uri = f"file://{sample_pdf.resolve()}"
         pages = loader.load_pages(pdf_uri)
         assert len(pages) >= 1
+
+    def test_pageloader_load_remote_image_url(self):
+        """Loads remote image URLs via HTTP."""
+        from glmocr.config import PageLoaderConfig
+        from glmocr.dataloader import PageLoader
+
+        loader = PageLoader(PageLoaderConfig())
+
+        image = Image.new("RGB", (8, 8), color="white")
+        buf = BytesIO()
+        image.save(buf, format="PNG")
+        image_bytes = buf.getvalue()
+
+        response = self._mock_streaming_response(image_bytes, "image/png")
+        loader._session = MagicMock()
+        loader._session.get.return_value = response
+
+        pages = loader.load_pages("https://example.com/sample.png")
+
+        assert len(pages) == 1
+        assert pages[0].size == (8, 8)
+        loader._session.get.assert_called_once_with(
+            "https://example.com/sample.png",
+            timeout=(loader.download_connect_timeout, loader.download_read_timeout),
+            stream=True,
+        )
+
+    def test_pageloader_load_remote_pdf_url(self):
+        """Treats remote PDF URLs as PDFs instead of images."""
+        from glmocr.config import PageLoaderConfig
+        from glmocr.dataloader import PageLoader
+
+        loader = PageLoader(PageLoaderConfig())
+        page = Image.new("RGB", (12, 12), color="white")
+
+        response = self._mock_streaming_response(b"%PDF-1.7 mock", "application/pdf")
+        loader._session = MagicMock()
+        loader._session.get.return_value = response
+        temp_paths = []
+
+        def _capture_temp_pdf(tmp_path):
+            temp_paths.append(tmp_path)
+            yield page
+
+        with patch.object(loader, "_iter_pdf", side_effect=_capture_temp_pdf) as mock_iter_pdf:
+            pages = loader.load_pages("https://example.com/sample.pdf")
+
+        assert pages == [page]
+        mock_iter_pdf.assert_called_once()
+        assert temp_paths
+        assert not Path(temp_paths[0]).exists()
+
+    def test_pageloader_rejects_remote_resource_larger_than_limit(self):
+        """Rejects oversized remote resources before loading them fully."""
+        from glmocr.config import PageLoaderConfig
+        from glmocr.dataloader import PageLoader
+
+        loader = PageLoader(PageLoaderConfig(download_max_size_mb=0.0001))
+        response = self._mock_streaming_response(
+            b"x" * 64,
+            "image/png",
+            content_length=1024,
+        )
+        loader._session = MagicMock()
+        loader._session.get.return_value = response
+
+        with pytest.raises(RuntimeError) as exc:
+            loader.load_pages("https://example.com/too-large.png")
+
+        assert "exceeds size limit" in str(exc.value)
+
+    def test_pageloader_parallel_prefetch_preserves_source_order(self):
+        """Prefetches multiple sources concurrently but yields in input order."""
+        from glmocr.config import PageLoaderConfig
+        from glmocr.dataloader import PageLoader
+
+        loader = PageLoader(PageLoaderConfig(remote_download_workers=2))
+        pages_by_source = {
+            "https://example.com/a.png": [Image.new("RGB", (1, 1), color="red")],
+            "https://example.com/b.png": [Image.new("RGB", (2, 2), color="blue")],
+        }
+
+        with patch.object(loader, "_prefetch_source", side_effect=lambda source: source):
+            with patch.object(
+                loader,
+                "_load_prefetched_source",
+                side_effect=lambda source: pages_by_source[source],
+            ):
+                pages, unit_indices = loader.load_pages_with_unit_indices(
+                    [
+                        "https://example.com/a.png",
+                        "https://example.com/b.png",
+                    ]
+                )
+
+        assert [page.size for page in pages] == [(1, 1), (2, 2)]
+        assert unit_indices == [0, 1]
 
     def test_iter_pages_with_unit_indices_pdf_and_multi_source(self):
         """Streaming: pages yielded incrementally; unit indices correct for multi-source."""

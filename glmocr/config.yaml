@@ -32,7 +32,7 @@ pipeline:
   #
   # Note: When maas.enabled=true, the ocr_api and layout settings below are ignored.
   maas:
-    enabled: true # Set to true to use MaaS mode
+    enabled: false # Set to true to use MaaS mode
     api_url: https://open.bigmodel.cn/api/paas/v4/layout_parsing
     model: glm-ocr
     api_key: null # Required! Get from https://open.bigmodel.cn
@@ -145,6 +145,12 @@ pipeline:
     pdf_max_pages: null # null = no limit
     pdf_verbose: false
 
+    # Remote download settings
+    download_connect_timeout: 10
+    download_read_timeout: 30
+    download_max_size_mb: 10.0
+    remote_download_workers: 1
+
   # Result formatter: post-processing and output formatting
   result_formatter:
     # Filter nested regions (remove overlapping smaller regions)
@@ -209,8 +215,9 @@ pipeline:
     # - "cpu": force CPU even when a GPU is available. Useful for single-GPU
     #   setups where the GPU is reserved for the OCR model.
     # - "cuda" or "cuda:N": use a specific GPU (overrides cuda_visible_devices).
+    # - "mps": use Apple Metal Performance Shaders (Mac only).
     # Can also be set via GLMOCR_LAYOUT_DEVICE env var or --layout-device CLI flag.
-    # device: null
+    device: mps
     # img_size: null                # resize input (optional)
 
     # Post-processing

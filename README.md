@@ -286,6 +286,10 @@ pipeline:
     image_format: JPEG
     min_pixels: 12544
     max_pixels: 71372800
+    download_connect_timeout: 10
+    download_read_timeout: 30
+    download_max_size_mb: 10.0
+    remote_download_workers: 1
 
   # Result formatting
   result_formatter:

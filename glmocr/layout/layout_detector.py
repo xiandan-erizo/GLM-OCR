@@ -233,6 +233,7 @@ class PPDocLayoutDetector(BaseLayoutDetector):
             raise RuntimeError("Layout detector not started. Call start() first.")
 
         num_images = len(images)
+        logger.debug("[layout] Processing %d image(s)", num_images)
         image_batch = []
         for image in images:
             image_width, image_height = image.size
@@ -245,6 +246,7 @@ class PPDocLayoutDetector(BaseLayoutDetector):
         for chunk_start in range(0, num_images, self.batch_size):
             chunk_end = min(chunk_start + self.batch_size, num_images)
             chunk_pil = pil_images[chunk_start:chunk_end]
+            logger.debug("[layout] Processing batch %d-%d/%d", chunk_start, chunk_end, num_images)
 
             inputs = self._image_processor(images=chunk_pil, return_tensors="pt")
             inputs = {k: v.to(self._device) for k, v in inputs.items()}
@@ -306,6 +308,8 @@ class PPDocLayoutDetector(BaseLayoutDetector):
             if self._device.startswith("cuda") and chunk_end < num_images:
                 del inputs, outputs, raw_results
                 torch.cuda.empty_cache()
+
+        logger.debug("[layout] Layout detection complete, %d results", len(all_paddle_format_results))
 
         saved_vis_paths = []
         if save_visualization and visualization_output_dir:

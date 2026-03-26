@@ -174,6 +174,10 @@ class PageLoaderConfig(_BaseConfig):
     pdf_dpi: int = 200
     pdf_max_pages: Optional[int] = None
     pdf_verbose: bool = False
+    download_connect_timeout: int = 10
+    download_read_timeout: int = 30
+    download_max_size_mb: float = 10.0
+    remote_download_workers: int = 1
 
 
 class ResultFormatterConfig(_BaseConfig):
@@ -213,6 +217,7 @@ class LayoutConfig(_BaseConfig):
         - "cpu"
         - "cuda"
         - "cuda:<int>" (e.g., "cuda:0", "cuda:1")
+        - "mps" (Apple Metal Performance Shaders)
         """
         if value is None:
             return value
@@ -220,7 +225,7 @@ class LayoutConfig(_BaseConfig):
         if v == "":
             # Treat empty string as "unset" for convenience.
             return None
-        if v == "cpu" or v == "cuda":
+        if v in ("cpu", "cuda", "mps"):
             return v
         if v.startswith("cuda:"):
             index_part = v[5:]
@@ -228,7 +233,7 @@ class LayoutConfig(_BaseConfig):
                 return v
         raise ValueError(
             "Invalid layout device value. Expected one of: None, 'cpu', 'cuda', "
-            "or 'cuda:<int>' (e.g., 'cuda:0')."
+            "'mps', or 'cuda:<int>' (e.g., 'cuda:0')."
         )
 
 

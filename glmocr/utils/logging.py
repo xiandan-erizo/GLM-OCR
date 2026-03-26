@@ -29,8 +29,9 @@ _PACKAGE_LOGGER_NAME = "glmocr"
 _configured = False
 _configured_source: Optional[str] = None  # "auto" | "explicit" | None
 # Default format
-_INFO_FORMAT = "%(message)s"
-_DEBUG_FORMAT = "[%(levelname)s] %(name)s: %(message)s"
+_INFO_FORMAT = "%(asctime)s %(message)s"
+_DEBUG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 class ProfileLogger:
@@ -130,7 +131,7 @@ def configure_logging(
     if format_string is None:
         format_string = _DEBUG_FORMAT if level_value == logging.DEBUG else _INFO_FORMAT
 
-    formatter = logging.Formatter(format_string)
+    formatter = logging.Formatter(format_string, datefmt=_DATE_FORMAT)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 

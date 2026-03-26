@@ -16,10 +16,15 @@ from __future__ import annotations
 import os
 import base64
 import time
+import tempfile
+from dataclasses import dataclass
+from concurrent.futures import Future, ThreadPoolExecutor
 from io import BytesIO
 from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple, Union
 
 from PIL import Image
+import requests
+from requests.adapters import HTTPAdapter
 
 
 from glmocr.utils.image_utils import (
@@ -36,6 +41,18 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 profiler = get_profiler(__name__)
+
+
+@dataclass
+class _PrefetchedSource:
+    """Materialized source ready to be consumed into page images."""
+
+    source: str
+    is_pdf: bool = False
+    file_path: Optional[str] = None
+    image_bytes: Optional[bytes] = None
+    content_type: str = ""
+    cleanup_path: Optional[str] = None
 
 
 class PageLoader:
@@ -90,6 +107,16 @@ class PageLoader:
         self.pdf_dpi = config.pdf_dpi
         self.pdf_max_pages = config.pdf_max_pages
         self.pdf_verbose = config.pdf_verbose
+        self.download_connect_timeout = config.download_connect_timeout
+        self.download_read_timeout = config.download_read_timeout
+        self.download_max_size_bytes = max(
+            1, int(float(config.download_max_size_mb) * 1024 * 1024)
+        )
+        self.remote_download_workers = max(1, int(config.remote_download_workers))
+        # Reuse HTTP connections for remote sources. Keep the pool bounded by
+        # the configured source prefetch parallelism.
+        self._pool_maxsize = max(4, self.remote_download_workers)
+        self._session: Optional[requests.Session] = None
 
     # =========================================================================
     # Page loading
@@ -110,8 +137,8 @@ class PageLoader:
             sources = [sources]
 
         all_pages = []
-        for source in sources:
-            pages = self._load_source(source)
+        for prefetched in self._iter_prefetched_sources_in_order(sources):
+            pages = self._load_prefetched_source(prefetched)
             all_pages.extend(pages)
 
         return all_pages
@@ -136,8 +163,10 @@ class PageLoader:
 
         all_pages: List[Image.Image] = []
         unit_indices: List[int] = []
-        for unit_idx, source in enumerate(sources):
-            pages = self._load_source(source)
+        for unit_idx, prefetched in enumerate(
+            self._iter_prefetched_sources_in_order(sources)
+        ):
+            pages = self._load_prefetched_source(prefetched)
             all_pages.extend(pages)
             unit_indices.extend([unit_idx] * len(pages))
         return all_pages, unit_indices
@@ -156,21 +185,15 @@ class PageLoader:
         """
         if isinstance(sources, str):
             sources = [sources]
-        for unit_idx, source in enumerate(sources):
-            for page in self._iter_source(source):
+        for unit_idx, prefetched in enumerate(
+            self._iter_prefetched_sources_in_order(sources)
+        ):
+            for page in self._iter_prefetched_source(prefetched):
                 yield page, unit_idx
 
     def _iter_source(self, source: str):
         """Yield pages from a single source one at a time."""
-        if source.startswith("file://"):
-            file_path = source[7:]
-        else:
-            file_path = source
-
-        if os.path.isfile(file_path) and file_path.lower().endswith(".pdf"):
-            yield from self._iter_pdf(file_path)
-        else:
-            yield self._load_image(source)
+        yield from self._iter_prefetched_source(self._prefetch_source(source))
 
     def _compute_end_page(self) -> Optional[int]:
         """Parse pdf_max_pages into 0-based inclusive end page index, or None for last page."""
@@ -190,7 +213,9 @@ class PageLoader:
             raise RuntimeError(
                 "PDF support requires pypdfium2. Install: pip install pypdfium2"
             )
+        logger.debug("[page_loader] Loading PDF: %s", file_path)
         end_page = self._compute_end_page()
+        page_idx = 0
         for image in pdf_to_images_pil_iter(
             file_path,
             dpi=self.pdf_dpi,
@@ -198,24 +223,89 @@ class PageLoader:
             start_page_id=0,
             end_page_id=end_page,
         ):
+            logger.debug("[page_loader] Rendered PDF page %d", page_idx)
+            page_idx += 1
             yield image
+        logger.debug("[page_loader] PDF loading complete, %d page(s)", page_idx)
 
     def _load_source(self, source: str) -> List[Image.Image]:
         """Load a single source and return a list of pages.
 
         PDFs return all pages; images return a single-page list.
         """
+        return self._load_prefetched_source(self._prefetch_source(source))
+
+    def _load_prefetched_source(
+        self, prefetched: _PrefetchedSource
+    ) -> List[Image.Image]:
+        return list(self._iter_prefetched_source(prefetched))
+
+    def _iter_prefetched_source(self, prefetched: _PrefetchedSource):
+        try:
+            if prefetched.is_pdf:
+                yield from self._iter_pdf(prefetched.file_path)
+            elif prefetched.image_bytes is not None:
+                yield self._load_image_from_bytes(
+                    prefetched.image_bytes, prefetched.source
+                )
+            else:
+                yield self._load_image(prefetched.file_path or prefetched.source)
+        finally:
+            if prefetched.cleanup_path:
+                try:
+                    os.unlink(prefetched.cleanup_path)
+                except OSError:
+                    logger.warning(
+                        "Failed to remove temporary PDF file: %s",
+                        prefetched.cleanup_path,
+                    )
+
+    def _iter_prefetched_sources_in_order(self, sources: List[str]):
+        if self.remote_download_workers <= 1 or len(sources) <= 1:
+            for source in sources:
+                yield self._prefetch_source(source)
+            return
+
+        max_workers = min(self.remote_download_workers, len(sources))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            pending: Dict[int, Future[_PrefetchedSource]] = {}
+            next_submit = 0
+
+            while next_submit < max_workers:
+                pending[next_submit] = executor.submit(
+                    self._prefetch_source, sources[next_submit]
+                )
+                next_submit += 1
+
+            for idx in range(len(sources)):
+                prefetched = pending.pop(idx).result()
+                if next_submit < len(sources):
+                    pending[next_submit] = executor.submit(
+                        self._prefetch_source, sources[next_submit]
+                    )
+                    next_submit += 1
+                yield prefetched
+
+    def _prefetch_source(self, source: str) -> _PrefetchedSource:
         if source.startswith("file://"):
             file_path = source[7:]
         else:
             file_path = source
 
-        # Detect PDF
         if os.path.isfile(file_path) and file_path.lower().endswith(".pdf"):
-            return self._load_pdf(file_path)
+            return _PrefetchedSource(
+                source=source,
+                is_pdf=True,
+                file_path=file_path,
+            )
+        if self._is_http_url(source):
+            return self._download_remote_source(source)
 
-        # Otherwise load as a single image page
-        return [self._load_image(source)]
+        return _PrefetchedSource(
+            source=source,
+            is_pdf=False,
+            file_path=file_path if os.path.isfile(file_path) else None,
+        )
 
     def _load_image(self, source: str) -> Image.Image:
         """Load a single image."""
@@ -232,6 +322,13 @@ class PageLoader:
             # Local file
             elif os.path.isfile(source):
                 return Image.open(source)
+            elif self._is_http_url(source):
+                prefetched = self._download_remote_source(source)
+                if prefetched.image_bytes is None:
+                    raise RuntimeError(
+                        f"Remote image source '{source}' was resolved as a PDF"
+                    )
+                return self._load_image_from_bytes(prefetched.image_bytes, source)
 
             else:
                 raise ValueError(f"Invalid image source: {source}")
@@ -239,12 +336,150 @@ class PageLoader:
         except Exception as e:
             raise RuntimeError(f"Error loading image '{source}': {e}")
 
+    @staticmethod
+    def _is_http_url(source: str) -> bool:
+        return source.startswith("http://") or source.startswith("https://")
+
+    @staticmethod
+    def _is_remote_pdf(source: str, content_type: str) -> bool:
+        source_no_query = source.split("?", 1)[0].split("#", 1)[0].lower()
+        return source_no_query.endswith(".pdf") or "application/pdf" in content_type
+
+    @staticmethod
+    def _load_image_from_bytes(image_bytes: bytes, source: str) -> Image.Image:
+        try:
+            return Image.open(BytesIO(image_bytes))
+        except Exception as e:
+            raise RuntimeError(f"Error loading image '{source}': {e}") from e
+
+    def _get_session(self) -> requests.Session:
+        if self._session is None:
+            session = requests.Session()
+            adapter = HTTPAdapter(
+                pool_connections=1,
+                pool_maxsize=self._pool_maxsize,
+                max_retries=0,
+            )
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            self._session = session
+        return self._session
+
+    def _validate_response_size(
+        self, source: str, content_length: Optional[str]
+    ) -> None:
+        if not content_length:
+            return
+        try:
+            expected_size = int(content_length)
+        except (TypeError, ValueError):
+            return
+        if expected_size > self.download_max_size_bytes:
+            raise RuntimeError(
+                f"Remote source '{source}' exceeds size limit "
+                f"({expected_size} bytes > {self.download_max_size_bytes} bytes)"
+            )
+
+    def _download_remote_source(self, source: str) -> _PrefetchedSource:
+        try:
+            logger.info("Downloading remote source: %s", source)
+            with self._get_session().get(
+                source,
+                timeout=(self.download_connect_timeout, self.download_read_timeout),
+                stream=True,
+            ) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "").lower()
+                self._validate_response_size(
+                    source, response.headers.get("Content-Length")
+                )
+
+                if self._is_remote_pdf(source, content_type):
+                    prefetched = self._download_remote_pdf_to_tempfile(
+                        source, response, content_type
+                    )
+                else:
+                    prefetched = self._download_remote_image_to_memory(
+                        source, response, content_type
+                    )
+            logger.info("Remote source downloaded: %s", source)
+            return prefetched
+        except Exception as e:
+            raise RuntimeError(f"Error downloading remote source '{source}': {e}") from e
+
+    def _download_remote_image_to_memory(
+        self,
+        source: str,
+        response: requests.Response,
+        content_type: str,
+    ) -> _PrefetchedSource:
+        total_size = 0
+        chunks: List[bytes] = []
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            total_size += len(chunk)
+            if total_size > self.download_max_size_bytes:
+                raise RuntimeError(
+                    f"Remote source '{source}' exceeds size limit "
+                    f"({total_size} bytes > {self.download_max_size_bytes} bytes)"
+                )
+            chunks.append(chunk)
+        return _PrefetchedSource(
+            source=source,
+            is_pdf=False,
+            image_bytes=b"".join(chunks),
+            content_type=content_type,
+        )
+
+    def _download_remote_pdf_to_tempfile(
+        self,
+        source: str,
+        response: requests.Response,
+        content_type: str,
+    ) -> _PrefetchedSource:
+        total_size = 0
+        tmp_path: Optional[str] = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp_path = tmp.name
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    total_size += len(chunk)
+                    if total_size > self.download_max_size_bytes:
+                        raise RuntimeError(
+                            f"Remote source '{source}' exceeds size limit "
+                            f"({total_size} bytes > {self.download_max_size_bytes} bytes)"
+                        )
+                    tmp.write(chunk)
+        except Exception:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    logger.warning("Failed to remove temporary PDF file: %s", tmp_path)
+            raise
+        logger.debug(
+            "[page_loader] Downloaded PDF to temp file %s (%d bytes)",
+            tmp_path,
+            total_size,
+        )
+        return _PrefetchedSource(
+            source=source,
+            is_pdf=True,
+            file_path=tmp_path,
+            content_type=content_type,
+            cleanup_path=tmp_path,
+        )
+
     def _load_pdf(self, file_path: str) -> List[Image.Image]:
         """Load all pages from a PDF file using pypdfium2 (required)."""
         if not PYPDFIUM2_AVAILABLE:
             raise RuntimeError(
                 "PDF support requires pypdfium2. Install: pip install pypdfium2"
             )
+        logger.debug("[page_loader] Loading PDF: %s", file_path)
         t0 = time.perf_counter()
         end_page = self._compute_end_page()
         pages = pdf_to_images_pil(
@@ -254,9 +489,11 @@ class PageLoader:
             start_page_id=0,
             end_page_id=end_page,
         )
+        elapsed = (time.perf_counter() - t0) * 1000
+        logger.debug("[page_loader] PDF loaded: %d page(s) in %.1fms", len(pages), elapsed)
         profiler.log(
             f"pdf_to_images_pil({os.path.basename(file_path)})",
-            (time.perf_counter() - t0) * 1000,
+            elapsed,
         )
         return pages
 
