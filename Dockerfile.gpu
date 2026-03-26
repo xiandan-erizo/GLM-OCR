@@ -36,6 +36,9 @@ COPY glmocr ./glmocr
 COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh && \
+    python -m pip install --no-cache-dir --break-system-packages \
+    --index-url https://download.pytorch.org/whl/cu124 \
+    torch==2.6.0 torchvision==0.21.0 && \
     python -m pip install --no-cache-dir --break-system-packages -e ".[server,layout]"
 
 EXPOSE 5002
