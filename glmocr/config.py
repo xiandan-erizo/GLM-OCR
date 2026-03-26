@@ -33,6 +33,10 @@ def _find_dotenv(start: Optional[Path] = None) -> Optional[Path]:
 _ENV_MAP: Dict[str, str] = {
     # mode
     "MODE": "pipeline.maas.enabled",  # "maas" | "selfhosted"
+    # Server
+    "SERVER_HOST": "server.host",
+    "SERVER_PORT": "server.port",
+    "SERVER_DEBUG": "server.debug",
     # MaaS settings
     "API_KEY": "pipeline.maas.api_key",
     "API_URL": "pipeline.maas.api_url",
@@ -44,12 +48,29 @@ _ENV_MAP: Dict[str, str] = {
     "OCR_API_HOST": "pipeline.ocr_api.api_host",
     "OCR_API_PORT": "pipeline.ocr_api.api_port",
     "OCR_MODEL": "pipeline.ocr_api.model",
+    "OCR_API_MODE": "pipeline.ocr_api.api_mode",
+    "OCR_VERIFY_SSL": "pipeline.ocr_api.verify_ssl",
+    "OCR_CONNECT_TIMEOUT": "pipeline.ocr_api.connect_timeout",
+    "OCR_REQUEST_TIMEOUT": "pipeline.ocr_api.request_timeout",
+    "OCR_CONNECTION_POOL_SIZE": "pipeline.ocr_api.connection_pool_size",
     # Layout
     "ENABLE_LAYOUT": "pipeline.enable_layout",
+    "LAYOUT_MODEL_DIR": "pipeline.layout.model_dir",
+    "LAYOUT_BATCH_SIZE": "pipeline.layout.batch_size",
+    "LAYOUT_WORKERS": "pipeline.layout.workers",
     # Allow overriding which GPU(s) the layout model uses
     "LAYOUT_CUDA_VISIBLE_DEVICES": "pipeline.layout.cuda_visible_devices",
     # Explicit device for layout model: "cpu", "cuda", "cuda:0", etc.
     "LAYOUT_DEVICE": "pipeline.layout.device",
+    # Pipeline parallelism
+    "MAX_WORKERS": "pipeline.max_workers",
+    "PAGE_MAXSIZE": "pipeline.page_maxsize",
+    "REGION_MAXSIZE": "pipeline.region_maxsize",
+    # Page loader download controls
+    "PAGELOADER_DOWNLOAD_CONNECT_TIMEOUT": "pipeline.page_loader.download_connect_timeout",
+    "PAGELOADER_DOWNLOAD_READ_TIMEOUT": "pipeline.page_loader.download_read_timeout",
+    "PAGELOADER_DOWNLOAD_MAX_SIZE_MB": "pipeline.page_loader.download_max_size_mb",
+    "PAGELOADER_REMOTE_DOWNLOAD_WORKERS": "pipeline.page_loader.remote_download_workers",
     # Logging
     "LOG_LEVEL": "logging.level",
 }
@@ -188,7 +209,7 @@ class ResultFormatterConfig(_BaseConfig):
 
 
 class LayoutConfig(_BaseConfig):
-    model_dir: Optional[str] = None
+    model_dir: Optional[str] = "PaddlePaddle/PP-DocLayoutV3_safetensors"
     threshold: float = 0.4
     threshold_by_class: Optional[Dict[Union[int, str], float]] = None
     batch_size: int = 8
@@ -269,15 +290,38 @@ def _set_nested(data: Dict[str, Any], dotted_path: str, value: Any) -> None:
 
 def _coerce_env_value(dotted_path: str, raw: str) -> Any:
     """Coerce a raw environment-variable string to the expected Python type."""
+    raw = raw.strip()
     # Boolean fields
-    if dotted_path in ("pipeline.maas.enabled", "pipeline.enable_layout"):
+    if dotted_path in (
+        "pipeline.maas.enabled",
+        "pipeline.enable_layout",
+        "server.debug",
+        "pipeline.ocr_api.verify_ssl",
+    ):
         # Special handling for MODE: "maas" → True, anything else → False
         if dotted_path == "pipeline.maas.enabled":
-            return raw.strip().lower() in ("maas", "true", "1", "yes")
-        return raw.strip().lower() in ("true", "1", "yes")
+            return raw.lower() in ("maas", "true", "1", "yes")
+        return raw.lower() in ("true", "1", "yes")
     # Integer fields
-    if dotted_path.endswith((".api_port", ".request_timeout", ".connect_timeout")):
+    if dotted_path.endswith(
+        (
+            ".api_port",
+            ".request_timeout",
+            ".connect_timeout",
+            ".port",
+            ".batch_size",
+            ".workers",
+            ".max_workers",
+            ".page_maxsize",
+            ".region_maxsize",
+            ".connection_pool_size",
+            ".remote_download_workers",
+        )
+    ):
         return int(raw)
+    # Float fields
+    if dotted_path.endswith(".download_max_size_mb"):
+        return float(raw)
     return raw
 
 
