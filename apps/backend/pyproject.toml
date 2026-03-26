@@ -83,5 +83,5 @@ warn_redundant_casts = true
 warn_unused_configs = true
 
 [[tool.uv.index]]
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true

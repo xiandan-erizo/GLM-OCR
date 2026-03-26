@@ -51,7 +51,7 @@ COPY app ./app
 RUN touch README.md
 
 # 安装uv包管理器并安装项目依赖
-RUN pip install --no-cache-dir uv -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+RUN pip install --no-cache-dir uv -i https://mirrors.aliyun.com/pypi/simple/ && \
     uv pip install --system -e . 
 
 
