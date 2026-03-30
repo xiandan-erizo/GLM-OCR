@@ -6,18 +6,15 @@ import traceback
 import multiprocessing
 from typing import TYPE_CHECKING
 
-try:
-    from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify
 
-    _FLASK_IMPORT_ERROR = None
-except ImportError as e:  # pragma: no cover
-    Flask = None  # type: ignore
-    request = None  # type: ignore
-    jsonify = None  # type: ignore
-    _FLASK_IMPORT_ERROR = e
+
+from flasgger import Swagger
+
 
 from glmocr.pipeline import Pipeline
 from glmocr.config import load_config
+from glmocr.swagger_spec import SWAGGER_TEMPLATE
 from glmocr.utils.logging import get_logger, configure_logging
 
 if TYPE_CHECKING:
@@ -38,13 +35,11 @@ def create_app(config: "GlmOcrConfig") -> Flask:
     Returns:
         Flask app instance.
     """
-    if Flask is None:
-        raise ImportError(
-            "Flask server support requires the optional server extra. "
-            "Install with: pip install 'glmocr[server]'"
-        ) from _FLASK_IMPORT_ERROR
 
     app = Flask(__name__)
+
+    if Swagger is not None:
+        Swagger(app, template=SWAGGER_TEMPLATE)
 
     # Create pipeline with typed config
     pipeline = Pipeline(config=config.pipeline)
@@ -55,24 +50,15 @@ def create_app(config: "GlmOcrConfig") -> Flask:
 
     @app.route("/glmocr/parse", methods=["POST"])
     def parse():
-        """Document parsing endpoint.
-
-        Request:
-            {
-                "images": ["url1", "url2", ...],  # image URLs (http/https/file/data)
-            }
-
-        Response:
-            {
-                "json_result": {...},
-                "markdown_result": "..."
-            }
-        """
+        """Parse documents (images/PDFs) and return OCR results."""
         logger.debug("[parse] Request received")
 
         # Validate Content-Type
         if request.headers.get("Content-Type") != "application/json":
-            logger.warning("[parse] Invalid Content-Type: %s", request.headers.get("Content-Type"))
+            logger.warning(
+                "[parse] Invalid Content-Type: %s", request.headers.get(
+                    "Content-Type")
+            )
             return (
                 jsonify(
                     {"error": "Invalid Content-Type. Expected 'application/json'."}
@@ -165,7 +151,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="GlmOcr Server")
-    parser.add_argument("--config", type=str, default=None, help="Config file path")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Config file path")
     parser.add_argument(
         "--log-level",
         type=str,
@@ -202,6 +189,7 @@ def main():
             "GlmOcr Server starting on %s:%d...", server_config.host, server_config.port
         )
         logger.info("API endpoint: /glmocr/parse")
+        logger.info("Swagger UI: /apidocs")
         logger.info("=" * 60)
         logger.info("")
 

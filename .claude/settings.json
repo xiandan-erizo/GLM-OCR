@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from glmocr.dataloader.page_loader import PageLoader, _PrefetchedSource; print\\(''Import OK''\\)\")",
+      "Bash(source .venv/bin/activate)",
+      "Bash(python -c \"from glmocr.dataloader.page_loader import PageLoader; print\\(''Import OK''\\)\")",
+      "Bash(pytest glmocr/tests/test_unit.py -v --tb=short -x)",
+      "Bash(pytest glmocr/tests/test_unit.py::TestPageLoader -v --tb=short)",
+      "Bash(pip install:*)",
+      "Bash(uv add:*)",
+      "Bash(python -c \"from glmocr.server import create_app; from glmocr.config import load_config; print\\(''Import OK''\\)\")",
+      "Bash(pytest glmocr/tests/test_unit.py::TestPageLoader glmocr/tests/test_unit.py::TestUtils::test_server_create_app_requires_flask_extra -v --tb=short)"
+    ]
+  }
+}

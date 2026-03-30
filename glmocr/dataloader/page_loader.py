@@ -287,6 +287,28 @@ class PageLoader:
                 yield prefetched
 
     def _prefetch_source(self, source: str) -> _PrefetchedSource:
+        # Handle data:application/pdf;base64,... or data:pdf;base64,... format
+        if source.startswith("data:application/pdf") or source.startswith("data:pdf"):
+            try:
+                header, base64_data = source.split(",", 1)
+                pdf_bytes = base64.b64decode(base64_data)
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    tmp.write(pdf_bytes)
+                    tmp_path = tmp.name
+                logger.debug(
+                    "[page_loader] Base64 PDF decoded to temp file: %s (%d bytes)",
+                    tmp_path,
+                    len(pdf_bytes),
+                )
+                return _PrefetchedSource(
+                    source=source,
+                    is_pdf=True,
+                    file_path=tmp_path,
+                    cleanup_path=tmp_path,
+                )
+            except Exception as e:
+                raise RuntimeError(f"Error decoding base64 PDF: {e}") from e
+
         if source.startswith("file://"):
             file_path = source[7:]
         else:
