@@ -16,8 +16,10 @@ COPY pyproject.toml README.md ./
 COPY glmocr ./glmocr
 COPY docker/entrypoint.sh /entrypoint.sh
 
+# 基础镜像已包含 torch/layout 依赖，只需安装增量依赖和项目本身
 RUN chmod +x /entrypoint.sh && \
-    python -m pip install --no-cache-dir --break-system-packages -e ".[server,layout]"
+    python -m pip install --no-cache-dir --break-system-packages flask flasgger && \
+    python -m pip install --no-cache-dir --break-system-packages -e .
 
 EXPOSE 5002
 
