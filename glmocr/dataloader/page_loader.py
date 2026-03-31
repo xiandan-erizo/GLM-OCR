@@ -323,11 +323,47 @@ class PageLoader:
         if self._is_http_url(source):
             return self._download_remote_source(source)
 
+        # Check if it's a raw base64 string (image data without data: prefix)
+        # This handles cases where users pass base64 data directly
+        image_bytes = self._try_decode_base64(source)
+        if image_bytes is not None:
+            return _PrefetchedSource(
+                source=source,
+                is_pdf=False,
+                image_bytes=image_bytes,
+            )
+
         return _PrefetchedSource(
             source=source,
             is_pdf=False,
             file_path=file_path if os.path.isfile(file_path) else None,
         )
+
+    @staticmethod
+    def _try_decode_base64(s: str) -> Optional[bytes]:
+        """Try to decode a base64 string, return None if not valid base64."""
+        # Remove whitespace/newlines
+        candidate = "".join(str(s).split())
+        if len(candidate) < 32:
+            return None
+
+        # Strip optional "<|base64|>" prefix
+        if candidate.startswith("<|base64|>"):
+            candidate = candidate[len("<|base64|>") :]
+
+        # If it looks like a filename (has a short extension), skip
+        if "." in candidate and len(candidate.rsplit(".", 1)[-1]) <= 5:
+            return None
+
+        # Pad for base64
+        pad = (-len(candidate)) % 4
+        if pad:
+            candidate = candidate + ("=" * pad)
+
+        try:
+            return base64.b64decode(candidate, validate=True)
+        except Exception:
+            return None
 
     def _load_image(self, source: str) -> Image.Image:
         """Load a single image."""
