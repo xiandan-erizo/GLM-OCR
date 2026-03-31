@@ -1,8 +1,6 @@
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+FROM ekb-repo.tencentcloudcr.com/library/glm-ocr-parse:hose-dev-20260330194524-daa93e7d
 
 WORKDIR /app
-
-ARG APT_MIRROR=
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -14,29 +12,11 @@ ENV PYTHONUNBUFFERED=1 \
     GLMOCR_ENABLE_LAYOUT=true \
     GLMOCR_LAYOUT_DEVICE=cuda:0
 
-RUN set -eux; \
-    if [ -n "${APT_MIRROR}" ] && [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
-        sed -i "s|archive.ubuntu.com|${APT_MIRROR}|g; s|security.ubuntu.com|${APT_MIRROR}|g" /etc/apt/sources.list.d/ubuntu.sources; \
-    fi; \
-    apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python-is-python3 \
-    ca-certificates \
-    libgomp1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    libgl1 \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY pyproject.toml README.md ./
 COPY glmocr ./glmocr
 COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh && \
-    python -m pip install --no-cache-dir --break-system-packages torch==2.6.0 torchvision==0.21.0 && \
     python -m pip install --no-cache-dir --break-system-packages -e ".[server,layout]"
 
 EXPOSE 5002
